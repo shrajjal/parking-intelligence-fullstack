@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import json
 import os
 from typing import Optional
 
@@ -45,6 +45,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+DASHBOARD_OUTPUT_DIR = PREDICTIONS_PATH.parent
+
+DASHBOARD_SUMMARY_PATH = DASHBOARD_OUTPUT_DIR / "dashboard_summary.json"
+DASHBOARD_TOP_STATIONS_PATH = DASHBOARD_OUTPUT_DIR / "dashboard_top_stations.csv"
+DASHBOARD_TOP_JUNCTIONS_PATH = DASHBOARD_OUTPUT_DIR / "dashboard_top_junctions.csv"
+DASHBOARD_TOP_JUNCTIONS_ALL_PATH = DASHBOARD_OUTPUT_DIR / "dashboard_top_junctions_all.csv"
+DASHBOARD_HOURLY_TREND_PATH = DASHBOARD_OUTPUT_DIR / "dashboard_hourly_trend.csv"
+DASHBOARD_VEHICLE_TYPES_PATH = DASHBOARD_OUTPUT_DIR / "dashboard_vehicle_types.csv"
+
+
+def read_dashboard_csv(path, limit: int | None = None):
+    df = pd.read_csv(path)
+
+    if limit is not None:
+        df = df.head(limit)
+
+    return {"data": df.fillna("").to_dict(orient="records")}
 
 def read_predictions() -> pd.DataFrame:
     """
@@ -201,6 +218,9 @@ def get_status():
 
 @app.get("/api/summary")
 def get_summary():
+    if DASHBOARD_SUMMARY_PATH.exists():
+        return json.loads(DASHBOARD_SUMMARY_PATH.read_text(encoding="utf-8"))
+
     df = load_clean_raw_data()
 
     if "predicted_violation_count" in df.columns:
@@ -222,6 +242,9 @@ def get_summary():
 
 @app.get("/api/top-stations")
 def get_top_stations(limit: int = Query(default=15, ge=1, le=100)):
+    if DASHBOARD_TOP_STATIONS_PATH.exists():
+        return read_dashboard_csv(DASHBOARD_TOP_STATIONS_PATH, limit)
+
     df = load_clean_raw_data()
     data = aggregate_violations(df, "police_station", limit)
 
@@ -233,6 +256,12 @@ def get_top_junctions(
     limit: int = Query(default=15, ge=1, le=100),
     include_unmapped: bool = Query(default=False),
 ):
+    if include_unmapped and DASHBOARD_TOP_JUNCTIONS_ALL_PATH.exists():
+        return read_dashboard_csv(DASHBOARD_TOP_JUNCTIONS_ALL_PATH, limit)
+
+    if DASHBOARD_TOP_JUNCTIONS_PATH.exists():
+        return read_dashboard_csv(DASHBOARD_TOP_JUNCTIONS_PATH, limit)
+
     df = load_clean_raw_data()
 
     if not include_unmapped and "junction_name" in df.columns:
@@ -245,6 +274,9 @@ def get_top_junctions(
 
 @app.get("/api/hourly-trend")
 def get_hourly_trend():
+    if DASHBOARD_HOURLY_TREND_PATH.exists():
+        return read_dashboard_csv(DASHBOARD_HOURLY_TREND_PATH)
+
     df = load_clean_raw_data()
 
     if "predicted_violation_count" in df.columns:
@@ -271,6 +303,9 @@ def get_hourly_trend():
 
 @app.get("/api/vehicle-types")
 def get_vehicle_types(limit: int = Query(default=12, ge=1, le=100)):
+    if DASHBOARD_VEHICLE_TYPES_PATH.exists():
+        return read_dashboard_csv(DASHBOARD_VEHICLE_TYPES_PATH, limit)
+
     df = load_clean_raw_data()
     data = aggregate_violations(df, "vehicle_type", limit)
 
