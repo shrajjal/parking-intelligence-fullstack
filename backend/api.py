@@ -1,6 +1,6 @@
 from __future__ import annotations
-import os
 
+import os
 from typing import Optional
 
 import pandas as pd
@@ -11,7 +11,6 @@ from src.predict import generate_predictions
 from src.traffic_service import (
     TomTomTrafficClient,
     calculate_proxy_congestion_scores,
-    enrich_with_live_traffic,
 )
 from src.utils import (
     AGGREGATED_DATA_PATH,
@@ -21,7 +20,6 @@ from src.utils import (
     METRICS_PATH,
     PREDICTIONS_PATH,
     RAW_DATA_PATH,
-    check_dataset_exists,
     clean_stringified_list,
     normalize_junction_name,
     safe_datetime,
@@ -36,7 +34,7 @@ app = FastAPI(
 
 cors_origins = os.getenv(
     "CORS_ORIGINS",
-    "https://parking-frontend-uv08.onrender.com,http://localhost:5173,http://127.0.0.1:5173"
+    "https://parking-frontend-uv08.onrender.com,http://localhost:5173,http://127.0.0.1:5173",
 ).split(",")
 
 app.add_middleware(
@@ -49,12 +47,19 @@ app.add_middleware(
 
 
 def read_predictions() -> pd.DataFrame:
+    """
+    Runtime prediction loader.
+
+    On Render, the large raw dataset is not uploaded.
+    So the deployed app should mainly use:
+    backend/outputs/hotspot_predictions.csv
+    """
     if not PREDICTIONS_PATH.exists():
         if not METADATA_PATH.exists() or not CATBOOST_MODEL_PATH.exists():
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "Predictions/model not found. First run: "
+                    "Predictions/model not found. First run locally: "
                     "python src/train_model.py and python src/predict.py"
                 ),
             )
@@ -74,29 +79,96 @@ def read_predictions() -> pd.DataFrame:
 
 
 def load_clean_raw_data() -> pd.DataFrame:
-    check_dataset_exists(RAW_DATA_PATH)
+    """
+    Loads raw dataset locally if available.
 
-    df = pd.read_csv(RAW_DATA_PATH)
-    df = df.dropna(subset=["latitude", "longitude", "created_datetime"]).copy()
+    On Render, the raw CSV is not present because it is larger than GitHub's
+    100 MB limit. In that case, fallback to hotspot_predictions.csv.
+    """
+    if RAW_DATA_PATH.exists():
+        df = pd.read_csv(RAW_DATA_PATH)
+        df = df.dropna(subset=["latitude", "longitude", "created_datetime"]).copy()
 
-    df["created_datetime"] = safe_datetime(df["created_datetime"])
-    df = df.dropna(subset=["created_datetime"]).copy()
+        df["created_datetime"] = safe_datetime(df["created_datetime"])
+        df = df.dropna(subset=["created_datetime"]).copy()
 
-    df["hour"] = df["created_datetime"].dt.hour
-    df["day_of_week"] = df["created_datetime"].dt.day_name()
-    df["month"] = df["created_datetime"].dt.month
+        df["hour"] = df["created_datetime"].dt.hour
+        df["day_of_week"] = df["created_datetime"].dt.day_name()
+        df["month"] = df["created_datetime"].dt.month
 
-    if "violation_type" in df.columns:
-        df["violation_type"] = df["violation_type"].apply(clean_stringified_list)
+        if "violation_type" in df.columns:
+            df["violation_type"] = df["violation_type"].apply(clean_stringified_list)
+
+        for col in ["police_station", "junction_name", "vehicle_type", "violation_type"]:
+            if col in df.columns:
+                df[col] = df[col].fillna("Unknown").astype(str).str.strip()
+
+        if "junction_name" in df.columns:
+            df["junction_name"] = df["junction_name"].apply(normalize_junction_name)
+
+        return df
+
+    # Render fallback: use prediction output.
+    df = read_predictions().copy()
+
+    if "police_station" not in df.columns:
+        df["police_station"] = "Unknown"
+
+    if "junction_name" not in df.columns:
+        df["junction_name"] = "Unknown"
+
+    if "hour" not in df.columns:
+        df["hour"] = 0
+
+    if "vehicle_type" not in df.columns:
+        if "common_vehicle_type" in df.columns:
+            df["vehicle_type"] = df["common_vehicle_type"]
+        else:
+            df["vehicle_type"] = "Unknown"
+
+    if "violation_type" not in df.columns:
+        if "common_violation_type" in df.columns:
+            df["violation_type"] = df["common_violation_type"]
+        else:
+            df["violation_type"] = "Unknown"
 
     for col in ["police_station", "junction_name", "vehicle_type", "violation_type"]:
-        if col in df.columns:
-            df[col] = df[col].fillna("Unknown").astype(str).str.strip()
+        df[col] = df[col].fillna("Unknown").astype(str).str.strip()
 
-    if "junction_name" in df.columns:
-        df["junction_name"] = df["junction_name"].apply(normalize_junction_name)
+    df["hour"] = pd.to_numeric(df["hour"], errors="coerce").fillna(0).astype(int)
 
     return df
+
+
+def aggregate_violations(df: pd.DataFrame, group_col: str, limit: int) -> pd.DataFrame:
+    """
+    If raw data is available, count rows.
+    If prediction output is used, sum predicted_violation_count.
+    """
+    if group_col not in df.columns:
+        return pd.DataFrame(columns=["name", "violations"])
+
+    if "predicted_violation_count" in df.columns:
+        temp = df.copy()
+        temp["predicted_violation_count"] = pd.to_numeric(
+            temp["predicted_violation_count"], errors="coerce"
+        ).fillna(0)
+
+        data = (
+            temp.groupby(group_col, as_index=False)["predicted_violation_count"]
+            .sum()
+            .sort_values("predicted_violation_count", ascending=False)
+            .head(limit)
+        )
+        data.columns = ["name", "violations"]
+    else:
+        data = df[group_col].value_counts().head(limit).reset_index()
+        data.columns = ["name", "violations"]
+
+    data["violations"] = pd.to_numeric(data["violations"], errors="coerce").fillna(0)
+    data["violations"] = data["violations"].round(2)
+
+    return data
 
 
 @app.get("/")
@@ -104,8 +176,14 @@ def home():
     return {
         "message": "Parking Hotspot Intelligence API is running",
         "docs": "/docs",
+        "health": "/health",
         "react_frontend_should_call": "/api/hotspots",
     }
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": "ml-backend"}
 
 
 @app.get("/api/status")
@@ -125,8 +203,17 @@ def get_status():
 def get_summary():
     df = load_clean_raw_data()
 
+    if "predicted_violation_count" in df.columns:
+        total_violations = int(
+            pd.to_numeric(df["predicted_violation_count"], errors="coerce")
+            .fillna(0)
+            .sum()
+        )
+    else:
+        total_violations = int(len(df))
+
     return {
-        "total_violations": int(len(df)),
+        "total_violations": total_violations,
         "police_stations": int(df["police_station"].nunique()),
         "junctions": int(df["junction_name"].nunique()),
         "vehicle_types": int(df["vehicle_type"].nunique()),
@@ -136,9 +223,7 @@ def get_summary():
 @app.get("/api/top-stations")
 def get_top_stations(limit: int = Query(default=15, ge=1, le=100)):
     df = load_clean_raw_data()
-
-    data = df["police_station"].value_counts().head(limit).reset_index()
-    data.columns = ["name", "violations"]
+    data = aggregate_violations(df, "police_station", limit)
 
     return {"data": data.to_dict(orient="records")}
 
@@ -150,11 +235,10 @@ def get_top_junctions(
 ):
     df = load_clean_raw_data()
 
-    if not include_unmapped:
+    if not include_unmapped and "junction_name" in df.columns:
         df = df[df["junction_name"].astype(str) != "Unmapped Location"]
 
-    data = df["junction_name"].value_counts().head(limit).reset_index()
-    data.columns = ["name", "violations"]
+    data = aggregate_violations(df, "junction_name", limit)
 
     return {"data": data.to_dict(orient="records")}
 
@@ -163,8 +247,24 @@ def get_top_junctions(
 def get_hourly_trend():
     df = load_clean_raw_data()
 
-    data = df.groupby("hour", as_index=False).size()
-    data.columns = ["hour", "violations"]
+    if "predicted_violation_count" in df.columns:
+        temp = df.copy()
+        temp["predicted_violation_count"] = pd.to_numeric(
+            temp["predicted_violation_count"], errors="coerce"
+        ).fillna(0)
+
+        data = (
+            temp.groupby("hour", as_index=False)["predicted_violation_count"]
+            .sum()
+            .sort_values("hour")
+        )
+        data.columns = ["hour", "violations"]
+    else:
+        data = df.groupby("hour", as_index=False).size()
+        data.columns = ["hour", "violations"]
+
+    data["violations"] = pd.to_numeric(data["violations"], errors="coerce").fillna(0)
+    data["violations"] = data["violations"].round(2)
 
     return {"data": data.to_dict(orient="records")}
 
@@ -172,9 +272,7 @@ def get_hourly_trend():
 @app.get("/api/vehicle-types")
 def get_vehicle_types(limit: int = Query(default=12, ge=1, le=100)):
     df = load_clean_raw_data()
-
-    data = df["vehicle_type"].value_counts().head(limit).reset_index()
-    data.columns = ["name", "violations"]
+    data = aggregate_violations(df, "vehicle_type", limit)
 
     return {"data": data.to_dict(orient="records")}
 
@@ -186,16 +284,12 @@ def get_hotspots(
     risk_level: Optional[str] = Query(default=None),
     hour: Optional[int] = Query(default=None),
     limit: int = Query(default=100, ge=1, le=1000),
-
-    # Kept only so frontend does not break.
-    # For HackerEarth submission, this value is ignored.
     live_traffic: bool = Query(default=False),
 ):
     df = read_predictions()
 
-    # IMPORTANT:
-    # For HackerEarth submission, do not use external live traffic API.
-    # Always use proxy congestion calculated from the provided dataset.
+    # For submission/prototype, external live traffic is disabled.
+    # Always use proxy congestion from dataset/model output.
     df = calculate_proxy_congestion_scores(df)
 
     if police_station:
@@ -228,10 +322,12 @@ def get_hotspots(
         if col not in df.columns:
             df[col] = default_value
 
-    # Force traffic source to proxy for compliance
     df["traffic_data_source"] = "proxy"
 
-    df = df.sort_values("final_enforcement_score", ascending=False).head(limit)
+    if "final_enforcement_score" in df.columns:
+        df = df.sort_values("final_enforcement_score", ascending=False)
+
+    df = df.head(limit)
 
     columns = [
         "hotspot_id",
@@ -265,7 +361,7 @@ def get_hotspots(
         "count": int(len(df)),
         "live_traffic_requested": False,
         "live_traffic_used": False,
-        "compliance_mode": "Only provided dataset used. External live traffic API disabled.",
+        "compliance_mode": "Only provided dataset/model output used. External live traffic API disabled.",
         "data": df[available_columns].fillna("").to_dict(orient="records"),
     }
 
@@ -306,6 +402,19 @@ def get_metrics():
 def get_filter_options():
     df = read_predictions()
 
+    required_defaults = {
+        "police_station": "Unknown",
+        "junction_name": "Unknown",
+        "risk_level": "Unknown",
+        "hour": 0,
+    }
+
+    for col, default_value in required_defaults.items():
+        if col not in df.columns:
+            df[col] = default_value
+
+    df["hour"] = pd.to_numeric(df["hour"], errors="coerce").fillna(0).astype(int)
+
     return {
         "police_stations": sorted(
             df["police_station"].dropna().astype(str).unique().tolist()
@@ -334,7 +443,3 @@ def debug_tomtom(
         "base_url": client.base_url,
         "test_result": live,
     }
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "service": "ml-backend"}
