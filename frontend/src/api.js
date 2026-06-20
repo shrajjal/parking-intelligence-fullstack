@@ -64,7 +64,7 @@ export function fetchMetrics() {
 
 
 const LLM_API_BASE_URL =
-  import.meta.env.VITE_LLM_API_URL || "http://127.0.0.1:8001";
+  import.meta.env.VITE_LLM_API_BASE_URL || "http://127.0.0.1:8001";
 
 export async function explainHotspotWithAI(hotspot) {
   const payload = {
