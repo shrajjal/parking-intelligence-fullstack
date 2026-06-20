@@ -1,0 +1,9 @@
+pandas
+numpy
+scikit-learn
+catboost
+joblib
+fastapi
+uvicorn
+requests
+python-dotenv
