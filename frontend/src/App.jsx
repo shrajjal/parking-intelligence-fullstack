@@ -706,7 +706,7 @@ export default function App() {
           </div>
 
           <div className="panel chart-panel">
-            <h3>Hour-wise Violation Trend</h3>
+            <h3>Hour-wise Violation Trend (IST)</h3>
             <ResponsiveContainer width="100%" height={320}>
               <LineChart
                 data={hourly}

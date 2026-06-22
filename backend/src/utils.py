@@ -96,19 +96,21 @@ def clean_stringified_list(value: Any) -> str:
     return text.replace("[", "").replace("]", "").replace('"', "").strip() or "Unknown"
 
 
-def safe_datetime(series: pd.Series) -> pd.Series:
-    parsed = pd.to_datetime(series, errors="coerce", utc=True)
-    return parsed.dt.tz_convert(None)
+def safe_datetime(series):
+    return pd.to_datetime(series, errors="coerce", utc=True).dt.tz_convert("Asia/Kolkata")
 
 
 def add_time_features(df: pd.DataFrame, datetime_col: str = "created_datetime") -> pd.DataFrame:
     df = df.copy()
+
     df[datetime_col] = safe_datetime(df[datetime_col])
-    df["date"] = df[datetime_col].dt.normalize()
+
+    df["date"] = df[datetime_col].dt.date
     df["hour"] = df[datetime_col].dt.hour.astype("Int64")
     df["day_of_week"] = df[datetime_col].dt.day_name()
     df["month"] = df[datetime_col].dt.month.astype("Int64")
-    df["is_weekend"] = df["day_of_week"].isin(["Saturday", "Sunday"]).astype(int)
+    df["is_weekend"] = df[datetime_col].dt.dayofweek.isin([5, 6]).astype(int)
+
     return df
 
 

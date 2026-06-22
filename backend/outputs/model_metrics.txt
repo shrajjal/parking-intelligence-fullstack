@@ -1,9 +1,9 @@
 Model Type: CatBoostRegressor
 Target: total violation_count grouped by hotspot_id + date + hour
-Train Rows: 798600
+Train Rows: 792000
 Validation Rows: 204600
-Train Date Range: 2023-11-09 to 2024-03-08
+Train Date Range: 2023-11-10 to 2024-03-08
 Validation Date Range: 2024-03-09 to 2024-04-08
-MAE: 0.271330
-RMSE: 2.015132
-R2 Score: 0.668815
+MAE: 0.266315
+RMSE: 2.012454
+R2 Score: 0.671753
