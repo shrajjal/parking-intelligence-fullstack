@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+// import { useEffect, useState } from "react";
 import AiExplanationCard from './AiExplanationCard';
 import {
   Bar,
@@ -441,6 +442,20 @@ function HotspotTable({ hotspots }) {
 }
 
 export default function App() {
+
+
+  const [theme, setTheme] = useState(() => {
+    return localStorage.getItem("theme") || "dark";
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("theme", theme);
+  }, [theme]);
+
+  const toggleTheme = () => {
+    setTheme((prev) => (prev === "dark" ? "light" : "dark"));
+  };
   const [summary, setSummary] = useState(null);
   const [stations, setStations] = useState([]);
   const [junctions, setJunctions] = useState([]);
@@ -644,14 +659,19 @@ export default function App() {
               and prioritize enforcement with traffic impact scoring.
             </p>
           </div>
+          <div className="hero-actions">
+  <button className="theme-toggle-btn" onClick={toggleTheme}>
+    {theme === "dark" ? "☀️ Light Mode" : "🌙 Dark Mode"}
+  </button>
 
-          <button
-            className="primary-btn"
-            onClick={handleRegenerate}
-            disabled={hotspotLoading}
-          >
-            {hotspotLoading ? 'Processing...' : 'Regenerate Predictions'}
-          </button>
+  <button
+    className="primary-btn"
+    onClick={handleRegenerate}
+    disabled={hotspotLoading}
+  >
+    {hotspotLoading ? "Processing..." : "Regenerate Predictions"}
+  </button>
+</div>
         </header>
 
         {error && <div className="error-box">{error}</div>}
