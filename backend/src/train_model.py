@@ -100,15 +100,16 @@ def train_catboost_model(X_train: pd.DataFrame, y_train: pd.Series, X_valid: pd.
     ]
 
     model = CatBoostRegressor(
-        iterations=700,
-        learning_rate=0.06,
+        iterations=1200,
+        learning_rate=0.03,
         depth=8,
+        l2_leaf_reg=5,
         loss_function="RMSE",
-        eval_metric="RMSE",
+        eval_metric="R2",
         random_seed=42,
         verbose=100,
         allow_writing_files=False,
-        early_stopping_rounds=50,
+        early_stopping_rounds=80,
     )
     model.fit(
         X_train,
@@ -164,7 +165,7 @@ def evaluate_model(y_true: pd.Series, y_pred: np.ndarray) -> Dict[str, float]:
 def main() -> None:
     ensure_directories()
     print("Loading/preparing training data...")
-    df = load_or_create_training_data()
+    df = load_or_create_training_data(force_preprocess=True)
     print(f"Training rows before split: {len(df):,}")
     print("Target: total violation_count per hotspot_id + date + hour")
 

@@ -74,8 +74,8 @@ def build_future_prediction_grid(panel: pd.DataFrame) -> pd.DataFrame:
         police_station = profile["police_station"]
 
         hotspot_history = panel[panel["hotspot_id"] == hotspot_id].copy()
-
-        for hour in range(24):
+        available_hours = sorted(panel["hour"].dropna().astype(int).unique())
+        for hour in available_hours:
             same_hour = hotspot_history[
                 hotspot_history["hour"].astype(int) == hour
             ].sort_values("date")

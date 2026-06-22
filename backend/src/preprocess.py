@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+TIME_BUCKET_HOURS = 2
+TIME_BUCKET_STARTS = list(range(0, 24, TIME_BUCKET_HOURS))
+
 from pathlib import Path
 from typing import Tuple
 
@@ -138,7 +141,7 @@ def create_zero_filled_panel(hourly_counts: pd.DataFrame, hotspot_profile: pd.Da
     min_date = pd.to_datetime(hourly_counts["date"]).min().normalize()
     max_date = pd.to_datetime(hourly_counts["date"]).max().normalize()
     all_dates = pd.date_range(min_date, max_date, freq="D")
-    all_hours = list(range(24))
+    all_hours = TIME_BUCKET_STARTS
     all_hotspots = hotspot_profile["hotspot_id"].unique().tolist()
 
     index = pd.MultiIndex.from_product(
@@ -160,46 +163,181 @@ def create_zero_filled_panel(hourly_counts: pd.DataFrame, hotspot_profile: pd.Da
     panel["is_weekend"] = panel["day_of_week"].isin(["Saturday", "Sunday"]).astype(int)
     return panel
 
-
 def add_lag_and_average_features(panel: pd.DataFrame) -> pd.DataFrame:
     """Add time-aware historical features without future leakage."""
     panel = panel.copy()
+    panel["date"] = pd.to_datetime(panel["date"])
+    panel["hour"] = panel["hour"].astype(int)
 
+    # Timestamp = date + hour
+    panel["timestamp"] = panel["date"] + pd.to_timedelta(panel["hour"], unit="h")
+
+    # -----------------------------
+    # Global prior mean
+    # -----------------------------
+    time_stats = (
+        panel.groupby("timestamp")["violation_count"]
+        .agg(["sum", "count"])
+        .sort_index()
+    )
+
+    time_stats["prior_sum"] = time_stats["sum"].cumsum().shift(1)
+    time_stats["prior_count"] = time_stats["count"].cumsum().shift(1)
+
+    time_stats["global_prior_mean"] = (
+        time_stats["prior_sum"] / time_stats["prior_count"]
+    ).fillna(0)
+
+    panel = panel.merge(
+        time_stats[["global_prior_mean"]],
+        left_on="timestamp",
+        right_index=True,
+        how="left",
+    )
+
+    panel["global_prior_mean"] = panel["global_prior_mean"].fillna(0)
+
+    # -----------------------------
+    # Lag + rolling mean/median
+    # -----------------------------
     panel = panel.sort_values(["hotspot_id", "hour", "date"]).reset_index(drop=True)
-    hotspot_hour_group = panel.groupby(["hotspot_id", "hour"], sort=False)["violation_count"]
+
+    hotspot_hour_group = panel.groupby(
+        ["hotspot_id", "hour"], sort=False
+    )["violation_count"]
+
     panel["lag_1_day_count"] = hotspot_hour_group.shift(1)
     panel["lag_7_day_count"] = hotspot_hour_group.shift(7)
+
+    panel["rolling_3_day_avg"] = hotspot_hour_group.transform(
+        lambda s: s.shift(1).rolling(window=3, min_periods=1).mean()
+    )
+
     panel["rolling_7_day_avg"] = hotspot_hour_group.transform(
         lambda s: s.shift(1).rolling(window=7, min_periods=1).mean()
     )
 
-    panel = panel.sort_values(["hotspot_id", "date", "hour"]).reset_index(drop=True)
-    panel["hotspot_avg_count"] = panel.groupby("hotspot_id", sort=False)["violation_count"].transform(
-        lambda s: s.shift(1).expanding().mean()
+    panel["rolling_14_day_avg"] = hotspot_hour_group.transform(
+        lambda s: s.shift(1).rolling(window=14, min_periods=1).mean()
     )
 
-    panel = panel.sort_values(["police_station", "hour", "date", "hotspot_id"]).reset_index(drop=True)
-    panel["station_hour_avg_count"] = panel.groupby(["police_station", "hour"], sort=False)["violation_count"].transform(
-        lambda s: s.shift(1).expanding().mean()
+    panel["rolling_3_day_median"] = hotspot_hour_group.transform(
+        lambda s: s.shift(1).rolling(window=3, min_periods=1).median()
+    )
+
+    panel["rolling_7_day_median"] = hotspot_hour_group.transform(
+        lambda s: s.shift(1).rolling(window=7, min_periods=1).median()
+    )
+
+    panel["rolling_14_day_median"] = hotspot_hour_group.transform(
+        lambda s: s.shift(1).rolling(window=14, min_periods=1).median()
+    )
+
+    # -----------------------------
+    # Hotspot Bayesian shrinkage
+    # -----------------------------
+    panel = panel.sort_values(["hotspot_id", "date", "hour"]).reset_index(drop=True)
+
+    hotspot_group = panel.groupby("hotspot_id", sort=False)["violation_count"]
+
+    panel["_hotspot_prior_sum"] = hotspot_group.cumsum() - panel["violation_count"]
+    panel["_hotspot_prior_count"] = hotspot_group.cumcount()
+
+    panel["hotspot_avg_count"] = (
+        panel["_hotspot_prior_sum"]
+        / panel["_hotspot_prior_count"].replace(0, np.nan)
+    ).fillna(0)
+
+    k_hotspot = 20.0
+
+    panel["hotspot_bayes_avg_count"] = (
+        panel["_hotspot_prior_sum"] + k_hotspot * panel["global_prior_mean"]
+    ) / (panel["_hotspot_prior_count"] + k_hotspot)
+
+    # -----------------------------
+    # Police station + hour Bayesian shrinkage
+    # -----------------------------
+    station_time_stats = (
+        panel.groupby(["police_station", "hour", "timestamp"])["violation_count"]
+        .agg(["sum", "count"])
+        .reset_index()
+        .sort_values(["police_station", "hour", "timestamp"])
+    )
+
+    station_group = station_time_stats.groupby(
+        ["police_station", "hour"], sort=False
+    )
+
+    station_time_stats["_station_prior_sum"] = (
+        station_group["sum"].cumsum() - station_time_stats["sum"]
+    )
+
+    station_time_stats["_station_prior_count"] = (
+        station_group["count"].cumsum() - station_time_stats["count"]
+    )
+
+    station_time_stats["station_hour_avg_count"] = (
+        station_time_stats["_station_prior_sum"]
+        / station_time_stats["_station_prior_count"].replace(0, np.nan)
+    ).fillna(0)
+
+    k_station = 30.0
+
+    station_time_stats["station_hour_bayes_avg_count"] = (
+        station_time_stats["_station_prior_sum"]
+        + k_station * panel["global_prior_mean"].mean()
+    ) / (station_time_stats["_station_prior_count"] + k_station)
+
+    panel = panel.merge(
+        station_time_stats[
+            [
+                "police_station",
+                "hour",
+                "timestamp",
+                "station_hour_avg_count",
+                "station_hour_bayes_avg_count",
+            ]
+        ],
+        on=["police_station", "hour", "timestamp"],
+        how="left",
     )
 
     feature_cols = [
+        "global_prior_mean",
         "lag_1_day_count",
         "lag_7_day_count",
+        "rolling_3_day_avg",
         "rolling_7_day_avg",
+        "rolling_14_day_avg",
+        "rolling_3_day_median",
+        "rolling_7_day_median",
+        "rolling_14_day_median",
         "hotspot_avg_count",
+        "hotspot_bayes_avg_count",
         "station_hour_avg_count",
+        "station_hour_bayes_avg_count",
     ]
-    panel[feature_cols] = panel[feature_cols].fillna(0)
-    panel = panel.sort_values(["date", "hour", "hotspot_id"]).reset_index(drop=True)
-    return panel
 
+    panel[feature_cols] = panel[feature_cols].fillna(0)
+
+    panel = panel.drop(
+        columns=[
+            "timestamp",
+            "_hotspot_prior_sum",
+            "_hotspot_prior_count",
+        ],
+        errors="ignore",
+    )
+
+    panel = panel.sort_values(["date", "hour", "hotspot_id"]).reset_index(drop=True)
+
+    return panel
 
 def preprocess_raw_data(
     csv_path: Path = RAW_DATA_PATH,
-    eps_meters: float = 150.0,
-    min_samples: int = 15,
-    min_hotspot_violations: int = 20,
+    eps_meters: float = 250.0,
+    min_samples: int = 10,
+    min_hotspot_violations: int = 30,
     drop_noise: bool = True,
     save_outputs: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, DBSCAN]:
@@ -219,7 +357,24 @@ def preprocess_raw_data(
 
     df = add_time_features(df, "created_datetime")
     df = df.dropna(subset=["created_datetime", "date", "hour", "month"]).copy()
+    df["hour"] = df["hour"].astype(int)
+    df["hour"] = (df["hour"] // TIME_BUCKET_HOURS) * TIME_BUCKET_HOURS
 
+    # Remove incomplete final week to avoid partial-week bias
+    df["date"] = pd.to_datetime(df["date"])
+
+    max_date = df["date"].max()
+    last_week_start = max_date - pd.Timedelta(days=max_date.weekday())
+
+    days_in_last_week = df.loc[df["date"] >= last_week_start, "date"].dt.date.nunique()
+
+    if days_in_last_week < 7:
+        print(
+            f"Removing incomplete final week: {last_week_start.date()} to {max_date.date()} "
+            f"({days_in_last_week} day(s))"
+        )
+        df = df[df["date"] < last_week_start].copy()    
+        
     for col in ["violation_type", "offence_code"]:
         if col in df.columns:
             df[col] = df[col].apply(clean_stringified_list)
